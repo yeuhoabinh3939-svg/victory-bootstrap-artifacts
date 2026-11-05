@@ -1,0 +1,9 @@
+{
+  "python": ">=3.10",
+  "python_packages": [],
+  "platform": "Linux x86_64",
+  "existing_system_components": ["OpenSSH server", "systemd", "cgroupv2", "useradd", "usermod"],
+  "installs_or_upgrades": [],
+  "model_calls": 0,
+  "paid_services": false
+}
