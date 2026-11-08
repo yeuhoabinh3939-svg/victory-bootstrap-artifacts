@@ -13,7 +13,9 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dev_transport as wire
 
-config = json.loads(Path(sys.argv[1]).read_bytes())
+child_mode = sys.argv[1] == "--sftp-child"
+config_path = Path(sys.argv[2] if child_mode else sys.argv[1])
+config = json.loads(config_path.read_bytes())
 root = Path(config["root"])
 request = os.environ.get("SSH_ORIGINAL_COMMAND", "")
 record = {**wire.command_metadata(request), "uid": os.geteuid(), "mode": config["mode"]}
@@ -22,6 +24,24 @@ record = {**wire.command_metadata(request), "uid": os.geteuid(), "mode": config[
 def save(value):
     name = root / "logs" / (str(time.time_ns()) + ".json")
     wire.durable_new(name, json.dumps(value).encode())
+
+
+if child_mode:
+    stage = "LANDLOCK_IMPORT"
+    try:
+        spec = importlib.util.spec_from_file_location("landlock", Path(__file__).with_name("landlock.py"))
+        sandbox = importlib.util.module_from_spec(spec); spec.loader.exec_module(sandbox)
+        stage = "LANDLOCK_RESTRICT"
+        abi = sandbox.restrict(root / "inbox")
+        os.write(2, (json.dumps({"stage": "LANDLOCK_APPLIED", "abi": abi, "uid": os.geteuid()}) + "\n").encode())
+        stage = "SFTP_EXEC"
+        os.execve("/usr/lib/openssh/sftp-server", ["sftp-server", "-e", "-l", "INFO", "-u", "0077", "-d", str(root / "inbox"),
+                  "-p", "realpath,stat,lstat,open,write,close,fstat,read,opendir,readdir,limits,expand-path,fsync"],
+                  {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"), "LANG": "C.UTF-8"})
+    except Exception as error:
+        os.write(2, (json.dumps({"stage": stage, "error_type": type(error).__name__, "errno": getattr(error, "errno", None),
+                                "code": str(error) if isinstance(error, ValueError) else "CHILD_OS_FAILURE"}) + "\n").encode())
+        raise SystemExit(1)
 
 
 try:
@@ -39,12 +59,8 @@ try:
                 raise wire.Stop("FIXED_COMMAND_ONLY") from None
         else:
             wire.canonical_subsystem(request)
-        spec = importlib.util.spec_from_file_location("landlock", Path(__file__).with_name("landlock.py"))
-        sandbox = importlib.util.module_from_spec(spec); spec.loader.exec_module(sandbox)
-        child = subprocess.run(["/usr/lib/openssh/sftp-server", "-e", "-l", "INFO", "-u", "0077", "-d", str(root / "inbox"),
-                                "-p", "realpath,stat,lstat,open,write,close,fstat,read,opendir,readdir,limits,expand-path,fsync"],
-                               stdin=sys.stdin.buffer, stdout=sys.stdout.buffer, stderr=subprocess.PIPE, timeout=40,
-                               preexec_fn=lambda: sandbox.restrict(root / "inbox"))
+        child = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--sftp-child", str(config_path)],
+                               stdin=sys.stdin.buffer, stdout=sys.stdout.buffer, stderr=subprocess.PIPE, timeout=40)
         record.update(wire.process_evidence(child.returncode, child.stderr, request))
         save(record)
         raise SystemExit(child.returncode)
@@ -65,13 +81,13 @@ try:
     if wire.sha(manifest_raw) != config["packet_sha256"]:
         raise wire.Stop("ROOT_PACKET_MANIFEST_PIN")
     contents = wire.body(sys.stdin.buffer, envelope)
-    result = wire.commit_packet(root / "frame-packet", envelope["manifest"], contents, os.geteuid())
+    result = wire.commit_packet(root / "frame/packet", envelope["manifest"], contents, os.geteuid())
     record.update(returncode=0, status="FIXTURE_PACKET_VERIFIED_NOT_DEPLOYMENT_PASS", packet=result)
     save(record)
     print(json.dumps(record))
 except Exception as error:
     code = error.code if isinstance(error, wire.Stop) else "FIXTURE_OS_OR_PROCESS_ERROR"
-    record.update(returncode=1, gateway_code=code, cleanup="PRESERVE_FIXTURE_NO_RETRY")
+    record.update(returncode=1, gateway_code=code, error_type=type(error).__name__, errno=getattr(error, "errno", None), cleanup="PRESERVE_FIXTURE_NO_RETRY")
     save(record)
     print(json.dumps({"gateway_code": code}), file=sys.stderr)
     raise SystemExit(1)

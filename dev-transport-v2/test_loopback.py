@@ -49,7 +49,7 @@ try:
     created = True
     account = pwd.getpwnam(username)
     (home / "home").mkdir(mode=0o755)
-    for name in ("logs", "inbox", "outside"):
+    for name in ("logs", "inbox", "outside", "frame"):
         path = home / name; path.mkdir(mode=0o700); os.chown(path, account.pw_uid, account.pw_gid)
     for name in ("host", "client"):
         required(["/usr/bin/ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(home / name)])
@@ -125,9 +125,9 @@ try:
     ssh = ["/usr/bin/ssh", *options, "-T", "-p", str(port), target]
     first = required([*ssh, "deploy-v1"], input=frame)
     assert json.loads(first.stdout)["status"] == "FIXTURE_PACKET_VERIFIED_NOT_DEPLOYMENT_PASS"
-    times = {p.name: p.stat().st_mtime_ns for p in (home / "frame-packet").iterdir()}
+    times = {p.name: p.stat().st_mtime_ns for p in (home / "frame/packet").iterdir()}
     second = required([*ssh, "deploy-v1"], input=frame)
-    assert times == {p.name: p.stat().st_mtime_ns for p in (home / "frame-packet").iterdir()}
+    assert times == {p.name: p.stat().st_mtime_ns for p in (home / "frame/packet").iterdir()}
     invalid = dict(envelope); invalid["document"] = raw.decode().replace('"model_calls":0', '"model_calls":1')
     bad = command([*ssh, "deploy-v1"], input=wire.encode(invalid, files))
     assert bad.returncode != 0 and b"OWNER_SIGNATURE_DENIED" in bad.stderr
@@ -149,13 +149,18 @@ except Exception as error:
         evidence["isolated_sshd_log"] = wire.sanitize((home / "sshd.log").read_bytes())
     raise
 finally:
+    evidence["gateway_process_receipts"] = [json.loads(p.read_bytes()) for p in sorted((home / "logs").glob("*.json"))]
+    evidence["cleanup"] = {"scope": "DISPOSABLE_CI_FIXTURE_ONLY", "state": "STARTED"}
     if server is not None:
         server.terminate(); server.wait(timeout=10)
     if created:
         assert pwd.getpwnam(username).pw_dir == str(home / "home")
         required(["/usr/sbin/userdel", username])
+        evidence["cleanup"]["fixture_account_removed"] = True
     # Keep no ephemeral private key in CI logs/artifacts. Test data is ephemeral.
+    shutil.rmtree(home)
+    evidence["cleanup"]["fixture_tree_removed"] = not home.exists()
+    evidence["cleanup"]["state"] = "COMPLETE"
     output = Path(__file__).resolve().parent / "LOOPBACK_RESULT.json"
     output.write_text(json.dumps(evidence, indent=2) + "\n")
     print(json.dumps(evidence, indent=2))
-    shutil.rmtree(home)
