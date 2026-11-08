@@ -102,6 +102,27 @@ try:
     evidence["steps"].append({"step": "LEGACY_EXACT_MATCH_REPRODUCED", "client_returncode": legacy.returncode,
                               "client_stderr": wire.sanitize(legacy.stderr), "gateway": rows[-1]})
     update("fixed")
+    # Real nonroot kernel probe: null is writable, unrelated devices and data
+    # remain denied. The disposable account owns outside, so DAC cannot mask it.
+    sentinel = home / "outside/read-fixture"
+    sentinel.write_bytes(b"preserve")
+    os.chown(sentinel, account.pw_uid, account.pw_gid)
+    probe = """import os,sys
+sys.path.insert(0,sys.argv[1])
+import landlock
+landlock.restrict(sys.argv[2])
+fd=os.open('/dev/null',os.O_RDWR);os.write(fd,b'fixture');assert os.read(fd,1)==b'';os.close(fd)
+for path,flags in [('/dev/urandom',os.O_WRONLY),(sys.argv[3],os.O_RDONLY),(sys.argv[3],os.O_WRONLY)]:
+    try: fd=os.open(path,flags)
+    except PermissionError: pass
+    else: os.close(fd);raise SystemExit('LANDLOCK_BOUNDARY_ESCAPE')
+print('VERIFIED_NULL_ONLY_AND_OUTSIDE_DENIAL_PASS')
+"""
+    device = required(["/usr/sbin/runuser", "-u", username, "--", "/usr/bin/python3", "-I", "-B", "-c", probe,
+                       str(entry), str(home / "inbox"), str(sentinel)])
+    assert device.stdout.strip() == b"VERIFIED_NULL_ONLY_AND_OUTSIDE_DENIAL_PASS"
+    assert sentinel.read_bytes() == b"preserve"
+    evidence["steps"].append({"step": "REAL_NONROOT_NULL_ONLY_AND_OUTSIDE_READ_WRITE_DENIAL_PASS"})
     fixed = required(sftp)
     assert (home / "readback.bin").read_bytes() == payload
     required(["/usr/sbin/runuser", "-u", username, "--", "/usr/bin/test", "-w", str(home / "outside")])

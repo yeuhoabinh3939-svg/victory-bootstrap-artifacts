@@ -27,11 +27,19 @@ def restrict(inbox, read_dirs=("/usr", "/lib", "/lib64", "/bin"), read_files=("/
     if fd < 0: raise OSError(ctypes.get_errno(), "LANDLOCK_CREATE")
     try:
         def add(path, rights, optional=False):
-            try: target = os.open(path, os.O_PATH | os.O_CLOEXEC)
+            try: target = os.open(path, os.O_PATH | os.O_CLOEXEC | (os.O_NOFOLLOW if path == "/dev/null" else 0))
             except FileNotFoundError:
                 if optional: return
                 raise
             try:
+                # OpenSSH sanitise_stdfd opens the null device O_RDWR at startup.
+                # Grant WRITE_FILE only to the verified Linux null device inode;
+                # never grant writes to /dev or to any other runtime read file.
+                if path == "/dev/null":
+                    info = os.fstat(target)
+                    if not stat.S_ISCHR(info.st_mode) or info.st_rdev != os.makedev(1, 3):
+                        raise ValueError("VERIFIED_NULL_DEVICE_REQUIRED")
+                    rights |= (1 << 1)
                 # Directory flags must not be used for single-file rules.
                 if not stat.S_ISDIR(os.fstat(target).st_mode): rights &= (1 << 0) | (1 << 1) | (1 << 2) | (1 << 14)
                 rule = Beneath(rights, target)
