@@ -1,0 +1,51 @@
+name: DEV transport regression (isolated Linux)
+on:
+  push:
+    paths:
+      - '.github/workflows/dev-transport-ci.yml'
+      - 'dev-transport-v2/**'
+permissions:
+  contents: read
+concurrency:
+  group: dev-transport-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  protocol:
+    if: github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Pinned generic sources, real isolated SSH and SFTP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -B - <<'PY'
+          import hashlib,json,os,pathlib,subprocess,sys,urllib.request
+          pins = {"dev_client.py":{"sha256":"d50c14002f715da05a2ee3c924b283d7f640f9972174af1c1b3e330691dd62a7","bytes":7166},"dev_gateway.py":{"sha256":"80fe82ca2b5d73a5de0c8ec3f0559a1286eadd523e235ec84b1dc9df341df138","bytes":13918},"dev_transport.py":{"sha256":"6e821ecaa37706f0f390e1a19442b5324a14179be5316fab904422abbec883cf","bytes":12936},"landlock.py":{"sha256":"345cd4e996e5664e14cb9a327f5bf15f84fbafb45cdf5a87ac13e04a8c4db38a","bytes":3082},"legacy_policy.py":{"sha256":"4cf8bcc42e9c6d2a0d67f566093f2ee3645b48ea0bc2ddc4a7435ec4799a4881","bytes":449},"loopback_gateway.py":{"sha256":"33956c2751e8243364c035746993b8d3a18765ace60ea101b690da961c20ef39","bytes":3831},"test_dev_transport.py":{"sha256":"0e35d02a1e07476d55930ab1cb8ea6fba4260129b9b3d0cfeabe9299c9b69840","bytes":12168},"test_loopback.py":{"sha256":"31321311ea3753acf0c1402ffdc94277b5603faf1e48309d40930514b1050a23","bytes":9312}}
+          root = pathlib.Path('transport-ci')
+          root.mkdir()
+          commit = os.environ['GITHUB_SHA']
+          prefix = 'https://raw.githubusercontent.com/' + os.environ['GITHUB_REPOSITORY'] + '/' + commit + '/dev-transport-v2/'
+          for name,pin in pins.items():
+              url = prefix + name
+              with urllib.request.urlopen(url,timeout=20) as response:
+                  raw = response.read(pin['bytes']+1)
+                  if response.geturl()!=url or len(raw)!=pin['bytes'] or hashlib.sha256(raw).hexdigest()!=pin['sha256']:
+                      raise ValueError('IMMUTABLE_SOURCE_PIN_MISMATCH')
+              (root/name).write_bytes(raw)
+          for command in ([sys.executable,'-B','test_dev_transport.py'], ['sudo','-n','/usr/bin/python3','-B','test_loopback.py']):
+              run = subprocess.run(command,cwd=root,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=180)
+              print(run.stdout.decode(errors='replace'),flush=True)
+              if run.returncode:
+                  raise SystemExit(run.returncode)
+          result = json.loads((root/'LOOPBACK_RESULT.json').read_bytes())
+          if result['status']!='LOOPBACK_PROTOCOL_PASS_NOT_VPS_DEPLOYMENT':
+              raise ValueError('LOOPBACK_NOT_PASS')
+          receipt={'status':'LINUX_PROTOCOL31_AND_LOOPBACK_PASS_NOT_VPS_DEPLOYMENT','source_commit':commit,'sources':pins,'loopback':result,'vps_connections':0,'model_calls':0}
+          print(json.dumps(receipt,indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as out:
+              out.write('Generic transport CI only. No target VPS, no deployment, no credentials.\n\n' + json.dumps(receipt,indent=2))
+          PY
+# Standard public Linux runner only. No secrets, paid runners, model, upload,
+# third-party actions, SSH to the target VPS, or modifications of its policies.
+
